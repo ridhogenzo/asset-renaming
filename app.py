@@ -3,26 +3,28 @@ from PIL import Image, ImageOps
 import io, base64, os, shutil, tempfile, re
 import numpy as np
 import cv2
-import pytesseract
-from datetime import datetime
+import easyocr
 from zipfile import ZipFile
 import pandas as pd
 
-# -------------------------
+# --------------------------------
 # PAGE CONFIG
-# -------------------------
+# --------------------------------
 st.set_page_config(page_title="📦 Asset Renaming", layout="centered")
 
-# -------------------------
+# OCR Reader (EasyOCR, aman untuk Streamlit Cloud)
+reader = easyocr.Reader(['en'], gpu=False)
+
+# --------------------------------
 # SESSION CACHE
-# -------------------------
+# --------------------------------
 if "cache" not in st.session_state:
     st.session_state.cache = {}   # filename → preview, rotated, ocr_text
 
 
-# ================================
+# --------------------------------
 # UTIL FUNCTIONS
-# ================================
+# --------------------------------
 def pil_to_bytes(pil_img, fmt="JPEG"):
     buf = io.BytesIO()
     pil_img.save(buf, format=fmt, quality=85)
@@ -49,19 +51,17 @@ def rotate_candidates_cv(image_cv):
     return rots
 
 def ocr_extract_text(pil_img):
-    gray = ImageOps.grayscale(pil_img)
-    txt = pytesseract.image_to_string(gray, lang='eng')
-    return txt
+    arr = np.array(pil_img)
+    result = reader.readtext(arr, detail=0)
+    return " ".join(result)
 
 def find_best_rotation(pil_img):
     cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-
     best = {"score": -1, "pil": pil_img, "ocr": ""}
 
     for angle, rot in rotate_candidates_cv(cv_img):
         pil_rot = Image.fromarray(cv2.cvtColor(rot, cv2.COLOR_BGR2RGB))
         txt = ocr_extract_text(pil_rot)
-
         score = len(re.findall(r'\d', txt))
 
         if score > best["score"]:
@@ -70,22 +70,21 @@ def find_best_rotation(pil_img):
     return best
 
 def extract_barcode(text):
-    """Cari angka 24xxxxxxx"""
     m = re.search(r"(24\d{6,8})", text)
     return m.group(1) if m else None
 
 
-# ================================
+# --------------------------------
 # UI
-# ================================
+# --------------------------------
 st.title("📦 Asset Renaming")
 
 st.markdown("""
-Upload foto Barcode, SN, Asset → sistem otomatis membaca barcode dan rename file.
+Upload foto Barcode, SN, Asset → sistem otomatis membaca teks lalu rename file.
 
-✨ Fitur:
+### Fitur:
 - Auto rotate (0°, 90°, 180°, 270°)
-- OCR-only (tanpa pyzbar → aman di Streamlit Cloud)
+- OCR-only (EasyOCR)
 - Reuse foto asset
 - Preview rapi 240×240
 - Export ZIP hasil rename
@@ -94,20 +93,15 @@ Upload foto Barcode, SN, Asset → sistem otomatis membaca barcode dan rename fi
 total_assets = st.number_input("Jumlah Asset:", 1, 50, 1)
 
 asset_inputs = []
-first_asset_file = None
-
 st.markdown("---")
 
-# ================================
+
+# --------------------------------
 # MAIN LOOP
-# ================================
+# --------------------------------
 for idx in range(total_assets):
 
     st.subheader(f"📁 Asset {idx+1}")
-
-    reuse_asset = False
-    if idx > 0:
-        reuse_asset = st.checkbox(f"Gunakan foto Asset dari Asset 1?", key=f"reuse_{idx}")
 
     uploaded = st.file_uploader(
         f"Upload foto Barcode, SN, Asset (3 foto) untuk Asset {idx+1}",
@@ -123,13 +117,12 @@ for idx in range(total_assets):
     uploaded = uploaded[:3]
 
     st.markdown("### 🖼 Preview Foto:")
-
     cols = st.columns(len(uploaded))
     role_map = {}
 
     for i, file in enumerate(uploaded):
 
-        # CACHE PROSES (rotasi + OCR)
+        # cache process
         if file.name not in st.session_state.cache:
             raw = file.read()
             file.seek(0)
@@ -150,7 +143,7 @@ for idx in range(total_assets):
             }
 
         cache = st.session_state.cache[file.name]
-        # PREVIEW
+
         with cols[i]:
             st.markdown(
                 f"""
@@ -177,9 +170,9 @@ for idx in range(total_assets):
     asset_inputs.append({"role_map": role_map})
 
 
-# ================================
+# --------------------------------
 # PROCESS BUTTON
-# ================================
+# --------------------------------
 st.markdown("---")
 
 if st.button("🚀 PROSES & DOWNLOAD ZIP"):
@@ -198,7 +191,7 @@ if st.button("🚀 PROSES & DOWNLOAD ZIP"):
     for idx, asset in enumerate(asset_inputs):
         role_map = asset["role_map"]
 
-        # BARCODE
+        # Barcode
         barcode_file = next(fn for fn,r in role_map.items() if r=="Barcode")
         cache = st.session_state.cache[barcode_file]
 
@@ -208,17 +201,18 @@ if st.button("🚀 PROSES & DOWNLOAD ZIP"):
         if not barcode_val:
             barcode_val = f"ASSET{idx+1}"
 
-        # SAVE RENAMED FILES
-        # Barcode
+        # Save
         cache["rotated"].save(os.path.join(outdir, f"Barcode_{barcode_val}.jpg"))
 
-        # SN
         sn_file = next(fn for fn,r in role_map.items() if r=="SN")
-        st.session_state.cache[sn_file]["rotated"].save(os.path.join(outdir, f"SN_{barcode_val}.jpg"))
+        st.session_state.cache[sn_file]["rotated"].save(
+            os.path.join(outdir, f"SN_{barcode_val}.jpg")
+        )
 
-        # Asset
         asset_file = next(fn for fn,r in role_map.items() if r=="Asset")
-        st.session_state.cache[asset_file]["rotated"].save(os.path.join(outdir, f"Asset_{barcode_val}.jpg"))
+        st.session_state.cache[asset_file]["rotated"].save(
+            os.path.join(outdir, f"Asset_{barcode_val}.jpg")
+        )
 
         summary.append({
             "asset": idx+1,
@@ -235,6 +229,6 @@ if st.button("🚀 PROSES & DOWNLOAD ZIP"):
         for f in os.listdir(outdir):
             z.write(os.path.join(outdir, f), arcname=f)
 
-    st.success("🎉 Selesai! File siap di-download.")
+    st.success("Selesai! File siap di-download.")
     with open(zip_path, "rb") as f:
         st.download_button("📦 Download ZIP", f, "hasil_rename.zip")

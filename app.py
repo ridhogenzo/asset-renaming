@@ -1,7 +1,7 @@
 # app.py
 import streamlit as st
 from PIL import Image, ImageOps
-import io, base64, os, shutil, tempfile, re
+import io, base64, os, tempfile, re
 import numpy as np
 import cv2
 import easyocr
@@ -9,28 +9,32 @@ from zipfile import ZipFile
 from datetime import datetime
 import pandas as pd
 
-# ===================================
+# =========================================================
 # PAGE CONFIG
-# ===================================
+# =========================================================
 st.set_page_config(page_title="Asset Renaming", layout="wide")
 
-# ===================================
-# INITIALIZE OCR (EasyOCR)
-# ===================================
-reader = easyocr.Reader(["en"], gpu=False)
+# =========================================================
+# OCR INIT (EasyOCR) — Cache agar cepat di Streamlit Cloud
+# =========================================================
+@st.cache_resource
+def load_ocr():
+    return easyocr.Reader(["en"], gpu=False)
 
-# ===================================
-# SESSION STATE CACHE
-# ===================================
+reader = load_ocr()
+
+# =========================================================
+# SESSION STATE
+# =========================================================
 if "preview_cache" not in st.session_state:
     st.session_state.preview_cache = {}
 
 if "original_img" not in st.session_state:
     st.session_state.original_img = {}
 
-# ===================================
-# STYLE (same as original)
-# ===================================
+# =========================================================
+# STYLE
+# =========================================================
 st.markdown("""
 <style>
 .reportview-container .main .block-container {
@@ -44,75 +48,34 @@ st.markdown("""
     overflow: hidden;
     border-radius: 12px;
     margin-bottom: 8px;
-    background: rgba(0,0,0,0.03);
+    background: rgba(255,255,255,0.05);
 }
 .preview-box img {
     width: 100%;
     height: 100%;
     object-fit: cover;
-    cursor: pointer;
-}
-.select, .stSelectbox>div>div>div>select {
-    width: 240px !important;
 }
 body { background: #0d0d0d; }
 h1 { color: #f2c94c; font-weight: 700; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===================================
-# LIGHTBOX VIEWER
-# ===================================
-st.markdown("""
-<script>
-function openLightbox(src){
-    const m = document.getElementById("lb-modal");
-    const i = document.getElementById("lb-image");
-    i.src = src;
-    i.style.transform = "scale(1)";
-    m.style.display = "flex";
-}
-function closeLightbox(){
-    document.getElementById("lb-modal").style.display = "none";
-}
-document.addEventListener("wheel", function(e){
-    const i = document.getElementById("lb-image");
-    if(!i) return;
-    let s = i.style.transform.replace(/[^0-9.]/g,"") || 1;
-    s = parseFloat(s);
-    if(e.deltaY < 0) s += 0.1; else s -= 0.1;
-    if(s < 0.2) s = 0.2;
-    i.style.transform = "scale(" + s + ")";
-});
-</script>
-
-<div id="lb-modal" style="
-    display:none; position:fixed; top:0; left:0; width:100%; height:100%;
-    background:rgba(0,0,0,0.86); justify-content:center; align-items:center; z-index:9999;">
-    <span onclick="closeLightbox()"
-        style="position:absolute; top:22px; right:32px; font-size:34px; color:white; cursor:pointer;">&times;</span>
-    <img id="lb-image" style="max-width:92%; max-height:92%; border-radius:10px;">
-</div>
-""", unsafe_allow_html=True)
-
-# ===================================
+# =========================================================
 # HELPER FUNCTIONS
-# ===================================
+# =========================================================
 def pil_to_b64_url(img):
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
-    enc = base64.b64encode(buf.getvalue()).decode()
-    return f"data:image/jpeg;base64,{enc}"
+    return f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
-def rotate_candidates_cv(cvimg):
+def rotate_candidates_cv(cv_img):
     for angle in (0, 90, 180, 270):
         if angle == 0:
-            yield cvimg
+            yield cv_img
         else:
-            h, w = cvimg.shape[:2]
+            h, w = cv_img.shape[:2]
             M = cv2.getRotationMatrix2D((w//2, h//2), angle, 1)
-            rotated = cv2.warpAffine(cvimg, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
-            yield rotated
+            yield cv2.warpAffine(cv_img, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
 
 def easyocr_text(pil_img):
     arr = np.array(pil_img)
@@ -120,43 +83,40 @@ def easyocr_text(pil_img):
     return " ".join(result)
 
 def best_preview_rotation(pil_img):
-    cvimg = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+    cv_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
     best_score = -1
     best_pil = pil_img
 
-    for rot in rotate_candidates_cv(cvimg):
-        pil_rot = Image.fromarray(cv2.cvtColor(rot, cv2.COLOR_BGR2RGB))
+    for rot_cv in rotate_candidates_cv(cv_img):
+        pil_rot = Image.fromarray(cv2.cvtColor(rot_cv, cv2.COLOR_BGR2RGB))
         txt = easyocr_text(pil_rot)
         score = len(re.findall(r"\d", txt))
-
         if score > best_score:
             best_score = score
             best_pil = pil_rot
-
     return best_pil
 
 def extract_barcode(text):
     m = re.search(r"(24\d{6,8})", text)
     return m.group(1) if m else None
 
-# ===================================
-# PAGE TITLE
-# ===================================
-st.title("📦 Asset Renaming (EasyOCR Version)")
-st.markdown("""
-Sistem otomatis untuk merename foto Barcode, SN, dan Asset menggunakan **EasyOCR**.
+# =========================================================
+# TITLE & DESCRIPTION
+# =========================================================
+st.title("📦 Asset Renaming")
 
-- Auto rotate preview (0°, 90°, 180°, 270°)  
-- FOTO ASLI tetap utuh (tidak dirotasi saat disimpan)  
-- Bisa pakai Asset reuse  
-- Fullscreen zoom  
+st.markdown("""
+Aplikasi untuk merename foto Barcode, SN, dan Asset secara otomatis.
+
+• Auto-rotate preview  
+• Gambar asli tetap utuh (tidak diubah saat disimpan)  
+• Mendukung reuse foto Asset  
 """)
 
-# ===================================
-# MAIN INPUT LOOP
-# ===================================
+# =========================================================
+# MAIN INPUT
+# =========================================================
 total_assets = st.number_input("Jumlah Asset:", 1, 50, 1)
-
 asset_records = []
 first_asset_key = None
 
@@ -169,7 +129,7 @@ for idx in range(total_assets):
         reuse = st.checkbox("Gunakan foto Asset dari Asset 1?", key=f"reuse_{idx}")
 
     uploaded = st.file_uploader(
-        f"Upload foto untuk Asset {idx+1} (max 3 file)",
+        f"Upload foto untuk Asset {idx+1}",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True,
         key=f"u_{idx}"
@@ -181,21 +141,21 @@ for idx in range(total_assets):
 
     uploaded = uploaded[:3]
 
-    st.markdown("### 🖼 Preview")
-    cols = st.columns(len(uploaded))
+    roles = ["Barcode", "SN"] if reuse else ["Barcode", "SN", "Asset"]
     role_map = {}
 
-    roles = ["Barcode", "SN"] if reuse else ["Barcode", "SN", "Asset"]
+    cols = st.columns(len(uploaded))
+    st.markdown("### Preview")
 
     for i, f in enumerate(uploaded):
         key = f"{idx}_{f.name}"
 
         raw = f.read()
         f.seek(0)
+
         pil_orig = Image.open(io.BytesIO(raw)).convert("RGB")
         st.session_state.original_img[key] = pil_orig
 
-        # PREVIEW ROTASI
         if key not in st.session_state.preview_cache:
             rot = best_preview_rotation(pil_orig)
             thumb = rot.copy()
@@ -208,20 +168,21 @@ for idx in range(total_assets):
             st.markdown(
                 f"""
                 <div class="preview-box">
-                    <img src="{url}" onclick="openLightbox('{url}')"/>
+                    <img src="{url}" />
                 </div>
                 """,
-                unsafe_allow_html=True
+                unsafe_allow_html=True,
             )
+
             sel = st.selectbox(
                 f"Foto ke-{i+1}",
                 roles,
-                key=f"role_{idx}_{i}"
+                key=f"role_{idx}_{i}",
             )
             role_map[key] = sel
 
     if len(set(role_map.values())) < len(roles):
-        st.warning("⚠ Barcode, SN, Asset harus unik.")
+        st.warning("⚠ Barcode, SN, Asset harus berbeda.")
         asset_records.append(None)
         continue
 
@@ -232,17 +193,16 @@ for idx in range(total_assets):
                 break
 
     asset_records.append({"map": role_map, "reuse": reuse})
-    st.success(f"Asset {idx+1} siap.")
 
-# ===================================
-# PROCESS & DOWNLOAD
-# ===================================
+# =========================================================
+# PROCESS
+# =========================================================
 st.markdown("---")
-if st.button("🚀 PROSES & DOWNLOAD ZIP"):
+if st.button("🚀 PROSES & DOWNLOAD"):
 
     incomplete = [i+1 for i,a in enumerate(asset_records) if a is None]
     if incomplete:
-        st.error(f"Asset belum lengkap: {incomplete}")
+        st.error(f"Asset berikut belum lengkap: {incomplete}")
         st.stop()
 
     tmp = tempfile.mkdtemp(prefix="assets_")
@@ -252,56 +212,51 @@ if st.button("🚀 PROSES & DOWNLOAD ZIP"):
     summary = []
 
     for idx, rec in enumerate(asset_records):
-        mapping = rec["map"]
+        roles = rec["map"]
         reuse = rec["reuse"]
 
-        # BARCODE
-        barcode_key = next(k for k,v in mapping.items() if v=="Barcode")
+        # ===== Barcode =====
+        barcode_key = next(k for k,v in roles.items() if v=="Barcode")
         pil_barcode = st.session_state.original_img[barcode_key]
 
-        # DETEKSI BARCODE VIA OCR + ROTASI
-        cvimg = cv2.cvtColor(np.array(pil_barcode), cv2.COLOR_RGB2BGR)
         text_all = ""
+        cvimg = cv2.cvtColor(np.array(pil_barcode), cv2.COLOR_RGB2BGR)
         for rot in rotate_candidates_cv(cvimg):
             pil_rot = Image.fromarray(cv2.cvtColor(rot, cv2.COLOR_BGR2RGB))
             text_all += " " + easyocr_text(pil_rot)
 
-        barcode_val = extract_barcode(text_all)
-        if not barcode_val:
-            barcode_val = f"ASSET{idx+1}"
+        code = extract_barcode(text_all)
+        if not code:
+            code = f"ASSET{idx+1}"
 
-        # SAVE BARCODE
-        pil_barcode.save(os.path.join(outdir, f"Barcode_{barcode_val}.jpg"))
+        pil_barcode.save(os.path.join(outdir, f"Barcode_{code}.jpg"))
 
-        # SAVE SN
-        sn_key = next(k for k,v in mapping.items() if v=="SN")
+        # ===== SN =====
+        sn_key = next(k for k,v in roles.items() if v=="SN")
         st.session_state.original_img[sn_key].save(
-            os.path.join(outdir, f"SN_{barcode_val}.jpg")
+            os.path.join(outdir, f"SN_{code}.jpg")
         )
 
-        # SAVE ASSET
+        # ===== Asset =====
         if reuse and first_asset_key:
             st.session_state.original_img[first_asset_key].save(
-                os.path.join(outdir, f"Asset_{barcode_val}.jpg")
+                os.path.join(outdir, f"Asset_{code}.jpg")
             )
         else:
-            asset_key = next(k for k,v in mapping.items() if v=="Asset")
-            st.session_state.original_img[asset_key].save(
-                os.path.join(outdir, f"Asset_{barcode_val}.jpg")
+            a_key = next(k for k,v in roles.items() if v=="Asset")
+            st.session_state.original_img[a_key].save(
+                os.path.join(outdir, f"Asset_{code}.jpg")
             )
 
-        summary.append({"asset": idx+1, "barcode": barcode_val})
+        summary.append({"asset": idx+1, "barcode": code})
 
-    df = pd.DataFrame(summary)
-    df.to_csv(os.path.join(outdir, "summary.csv"), index=False)
+    pd.DataFrame(summary).to_csv(os.path.join(outdir, "summary.csv"), index=False)
 
-    zip_path = os.path.join(
-        tmp, f"rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    )
+    zip_path = os.path.join(tmp, f"hasil_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with ZipFile(zip_path, "w") as z:
         for f in os.listdir(outdir):
             z.write(os.path.join(outdir, f), arcname=f)
 
-    st.success("✔ Selesai. Silakan download hasilnya:")
+    st.success("✔ Selesai. Silakan download hasilnya.")
     with open(zip_path, "rb") as f:
         st.download_button("📦 Download ZIP", f, file_name=os.path.basename(zip_path))

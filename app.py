@@ -15,7 +15,7 @@ import pandas as pd
 st.set_page_config(page_title="Asset Renaming", layout="wide")
 
 # =========================================================
-# OCR INIT (EasyOCR) — Cache agar cepat di Streamlit Cloud
+# OCR INIT (EasyOCR) — cache biar cepat
 # =========================================================
 @st.cache_resource
 def load_ocr():
@@ -78,8 +78,7 @@ def rotate_candidates_cv(cv_img):
             yield cv2.warpAffine(cv_img, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
 
 def easyocr_text(pil_img):
-    arr = np.array(pil_img)
-    result = reader.readtext(arr, detail=0)
+    result = reader.readtext(np.array(pil_img), detail=0)
     return " ".join(result)
 
 def best_preview_rotation(pil_img):
@@ -94,11 +93,26 @@ def best_preview_rotation(pil_img):
         if score > best_score:
             best_score = score
             best_pil = pil_rot
+
     return best_pil
 
 def extract_barcode(text):
     m = re.search(r"(24\d{6,8})", text)
     return m.group(1) if m else None
+
+# =========================================================
+# COMPRESSOR
+# =========================================================
+def compress_image(pil_img, max_size=1600, quality=80):
+    """Resize + compress output supaya lebih kecil dan cepat"""
+    img = pil_img.copy()
+    img.thumbnail((max_size, max_size))
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", optimize=True, quality=quality)
+    buf.seek(0)
+
+    return Image.open(buf)
 
 # =========================================================
 # TITLE & DESCRIPTION
@@ -111,6 +125,7 @@ Aplikasi untuk merename foto Barcode, SN, dan Asset secara otomatis.
 • Auto-rotate preview  
 • Gambar asli tetap utuh (tidak diubah saat disimpan)  
 • Mendukung reuse foto Asset  
+• Output otomatis dikompres agar lebih ringan  
 """)
 
 # =========================================================
@@ -140,11 +155,11 @@ for idx in range(total_assets):
         continue
 
     uploaded = uploaded[:3]
-
     roles = ["Barcode", "SN"] if reuse else ["Barcode", "SN", "Asset"]
     role_map = {}
 
     cols = st.columns(len(uploaded))
+
     st.markdown("### Preview")
 
     for i, f in enumerate(uploaded):
@@ -152,7 +167,6 @@ for idx in range(total_assets):
 
         raw = f.read()
         f.seek(0)
-
         pil_orig = Image.open(io.BytesIO(raw)).convert("RGB")
         st.session_state.original_img[key] = pil_orig
 
@@ -173,7 +187,6 @@ for idx in range(total_assets):
                 """,
                 unsafe_allow_html=True,
             )
-
             sel = st.selectbox(
                 f"Foto ke-{i+1}",
                 roles,
@@ -202,7 +215,7 @@ if st.button("🚀 PROSES & DOWNLOAD"):
 
     incomplete = [i+1 for i,a in enumerate(asset_records) if a is None]
     if incomplete:
-        st.error(f"Asset berikut belum lengkap: {incomplete}")
+        st.error(f"Asset belum lengkap: {incomplete}")
         st.stop()
 
     tmp = tempfile.mkdtemp(prefix="assets_")
@@ -215,10 +228,11 @@ if st.button("🚀 PROSES & DOWNLOAD"):
         roles = rec["map"]
         reuse = rec["reuse"]
 
-        # ===== Barcode =====
+        # ===== BARCODE =====
         barcode_key = next(k for k,v in roles.items() if v=="Barcode")
         pil_barcode = st.session_state.original_img[barcode_key]
 
+        # OCR barcode
         text_all = ""
         cvimg = cv2.cvtColor(np.array(pil_barcode), cv2.COLOR_RGB2BGR)
         for rot in rotate_candidates_cv(cvimg):
@@ -229,29 +243,32 @@ if st.button("🚀 PROSES & DOWNLOAD"):
         if not code:
             code = f"ASSET{idx+1}"
 
-        pil_barcode.save(os.path.join(outdir, f"Barcode_{code}.jpg"))
+        # Simpan dengan compress
+        compress_image(pil_barcode).save(os.path.join(outdir, f"Barcode_{code}.jpg"))
 
         # ===== SN =====
         sn_key = next(k for k,v in roles.items() if v=="SN")
-        st.session_state.original_img[sn_key].save(
+        compress_image(st.session_state.original_img[sn_key]).save(
             os.path.join(outdir, f"SN_{code}.jpg")
         )
 
-        # ===== Asset =====
+        # ===== Asset =====        
         if reuse and first_asset_key:
-            st.session_state.original_img[first_asset_key].save(
+            compress_image(st.session_state.original_img[first_asset_key]).save(
                 os.path.join(outdir, f"Asset_{code}.jpg")
             )
         else:
             a_key = next(k for k,v in roles.items() if v=="Asset")
-            st.session_state.original_img[a_key].save(
+            compress_image(st.session_state.original_img[a_key]).save(
                 os.path.join(outdir, f"Asset_{code}.jpg")
             )
 
         summary.append({"asset": idx+1, "barcode": code})
 
+    # CSV
     pd.DataFrame(summary).to_csv(os.path.join(outdir, "summary.csv"), index=False)
 
+    # ZIP
     zip_path = os.path.join(tmp, f"hasil_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     with ZipFile(zip_path, "w") as z:
         for f in os.listdir(outdir):
